@@ -119,13 +119,13 @@ function rure_set_free(re)
     ccall((:rure_set_free, librure), Cvoid, (Ptr{Cvoid #= rure_set =#},), re)
 end
 
-# function rure_set_is_match(re, haystack, length, start)
-#     ccall((:rure_set_is_match, librure), Bool, (Ptr{Cvoid #= rure_set =#}, Ptr{UInt8}, Csize_t, Csize_t), re, haystack, length, start)
-# end
-
-function rure_set_matches(re, haystack, length, start, matches)
-    ccall((:rure_set_matches, librure), Bool, (Ptr{Cvoid #= rure_set =#}, Ptr{UInt8}, Csize_t, Csize_t, Ptr{Bool}), re, haystack, length, start, matches)
+function rure_set_is_match(re, haystack, length, start)
+    ccall((:rure_set_is_match, librure), Bool, (Ptr{Cvoid #= rure_set =#}, Ptr{UInt8}, Csize_t, Csize_t), re, haystack, length, start)
 end
+
+# function rure_set_matches(re, haystack, length, start, matches)
+#     ccall((:rure_set_matches, librure), Bool, (Ptr{Cvoid #= rure_set =#}, Ptr{UInt8}, Csize_t, Csize_t, Ptr{Bool}), re, haystack, length, start, matches)
+# end
 
 function rure_set_len(re)
     ccall((:rure_set_len, librure), Csize_t, (Ptr{Cvoid #= rure_set =#},), re)

@@ -18,6 +18,8 @@ mutable struct RuObj{F} <: Ref{Cvoid}
 end
 Base.cconvert(::Type{Ptr{Cvoid}}, obj::RuObj) = obj.ptr
 
+Base.show(io::IO, obj::RuObj) = (print(io, "RuObj("); show(io, obj.ptr); print(io, ')'))
+
 """
     @rure_str -> RuRegex
 
@@ -222,7 +224,7 @@ struct RuRegexSet
             error("RuRE: ", msg)
         end
         obj = RuObj(ptr, RuRE.rure_set_free)
-        return new(obj)
+        return new(patterns, obj)
     end
 end
 RuRegexSet(patterns::Vector{<:AbstractString}, flags = RuRE.RURE_DEFAULT_FLAGS, options = C_NULL) =
