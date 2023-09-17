@@ -18,8 +18,35 @@ mutable struct RuObj{F} <: Ref{Cvoid}
 end
 Base.cconvert(::Type{Ptr{Cvoid}}, obj::RuObj) = obj.ptr
 
+"""
+    @rure_str -> RuRegex
+
+Construct a rust regex, such as `rure"^[a-z]*\$"`, without interpolation and unescaping (except for
+ quotation mark `"` which still has to be escaped). The regex also accepts one or more flags,
+ listed after the ending quote:
+
+- case insensitive (i) flag.
+- multi-line matching (m) flag. (`^` and `\$` match new line boundaries.)
+- any character (s) flag. ("." matches new line.)
+- greedy swap (U) flag. (e.g., `+` is ungreedy and `+?` is greedy.)
+- ignore whitespace (x) flag.
+- Unicode (u) flag. (default flag)
+
+
+See also: [`RuRegex`](@ref)
+
+"""
 macro rure_str(pattern, flags...) RuRegex(pattern, flags...) end
 
+"""
+    RuRegex(pattern[, flags]) <: AbstractPattern
+
+A type representing rust regular expression. `RuRegex` support `occursin`, `findnext`, `findfirst`,
+ `match`, and `eatchmatch`.
+
+See also: [`@rure_str`](@ref)
+
+"""
 struct RuRegex <: AbstractPattern
     pattern::String
     flags::UInt32
@@ -171,6 +198,18 @@ end
 
 const RuRegexMatchIterator = RuIterator{RuRE.rure_iter_next_captures}
 RuRegexMatchIterator(r::RuRegex, s::String) = RuIterator(r, s)
+
+function Base.show(io::IO, itr::RuIterator{F}) where F
+    if F isa typeof(RuRE.rure_iter_next)
+        print(io, "RuIterator{RuRE.rure_iter_next}(")
+    else
+        print(io, "RuRegexMatchIterator(")
+    end
+    show(io, itr.re)
+    print(io, ", ")
+    show(io, itr.string)
+    print(io, ')')
+end
 
 struct RuRegexSet
     patterns::Vector{String}
