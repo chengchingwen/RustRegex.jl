@@ -7,6 +7,7 @@ version = "0.0.1"
 rure_jll = "2a13b4fb-3cbe-5d55-9db2-86fcb16976f1"
 
 [compat]
+rure_jll = "0.2.2"
 julia = "1.6"
 
 [extras]
