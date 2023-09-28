@@ -1,7 +1,7 @@
 name = "RustRegex"
 uuid = "cdf36688-0c6d-42c6-a883-5d2df16e9e88"
 authors = ["chengchingwen <chengchingwen214@gmail.com> and contributors"]
-version = "0.0.1"
+version = "0.1.0"
 
 [deps]
 rure_jll = "2a13b4fb-3cbe-5d55-9db2-86fcb16976f1"
