@@ -3,7 +3,7 @@ module RustRegex
 include("rure.jl")
 using .RuRE
 
-export RuRegex, @rure_str
+export RuRegex, @rure_str, RuRegexMatch
 
 mutable struct RuObj{F} <: Ref{Cvoid}
     ptr::Ptr{Cvoid}
@@ -19,6 +19,9 @@ end
 Base.cconvert(::Type{Ptr{Cvoid}}, obj::RuObj) = obj.ptr
 
 Base.show(io::IO, obj::RuObj) = (print(io, "RuObj("); show(io, obj.ptr); print(io, ')'))
+
+
+_finalize(x) = finalize(x.obj)
 
 """
     @rure_str -> RuRegex
@@ -43,8 +46,9 @@ macro rure_str(pattern, flags...) RuRegex(pattern, flags...) end
 """
     RuRegex(pattern[, flags]) <: AbstractPattern
 
-A type representing rust regular expression. `RuRegex` support `occursin`, `findnext`, `findfirst`,
- `match`, and `eatchmatch`.
+A type representing rust regular expression. Some syntax and behavior might be different from PCRE regex.
+ `RuRegex` support `occursin`, `findnext`, `findfirst`, `findall`, `replace`, `split`,
+ `startswith`, `endswith`, `count`, `match`, and `eatchmatch`.
 
 See also: [`@rure_str`](@ref)
 
@@ -59,6 +63,7 @@ struct RuRegex <: AbstractPattern
         ptr = RuRE.rure_compile(pattern, len, flags, options, err)
         if ptr == C_NULL
             msg = Base.unsafe_string(RuRE.rure_error_message(err))
+            _finalize(err)
             error("RuRE: ", msg)
         end
         return new(pattern, flags, RuObj(ptr, RuRE.rure_free))
@@ -152,8 +157,8 @@ Base.eltype(::Type{RuCaptureNamesIterator}) = Union{String, Int}
 Base.IteratorSize(::Type{RuCaptureNamesIterator}) = Base.SizeUnknown()
 function Base.iterate(itr::RuCaptureNamesIterator)
     name_ptr = Ref{Ptr{Cchar}}(C_NULL)
-    has_names = RuRE.rure_iter_capture_names_next(itr, name_ptr)
-    return has_names ? Base.iterate(itr, 1) : nothing
+    RuRE.rure_iter_capture_names_next(itr, name_ptr)
+    return Base.iterate(itr, 1)
 end
 function Base.iterate(itr::RuCaptureNamesIterator, i)
     name_ptr = Ref{Ptr{Cchar}}(C_NULL)
@@ -163,15 +168,43 @@ function Base.iterate(itr::RuCaptureNamesIterator, i)
     return (isempty(name) ? i : name, i+1)
 end
 
+"""
+    RuIterator(re::RuRegex, str::String; capture = false)
+
+A iterator return each matched substring. By setting `capture = true`, this is equivalent to `eachmatch(re, str)`.
+
+# Example
+
+```julia-repl
+julia> collect(RustRegex.RuIterator(rure"\\w+", "a b c"))
+3-element Vector{SubString{String}}:
+ "a"
+ "b"
+ "c"
+
+julia> collect(RustRegex.RuIterator(rure"\\w+", "a b c"; capture = true))
+3-element Vector{RustRegex.RuRegexMatch}:
+ RuRegexMatch("a")
+ RuRegexMatch("b")
+ RuRegexMatch("c")
+
+```
+"""
 struct RuIterator{F}
     re::RuRegex
     string::String
     obj::RuObj{typeof(RuRE.rure_iter_free)}
     function RuIterator(re::RuRegex, str::String; capture::Union{Bool, Nothing} = nothing)
-        obj = RuObj(RuRE.rure_iter_new(re), RuRE.rure_iter_free)
-        isnothing(capture) && return new{RuRE.rure_iter_next_captures}(re, str, obj)
+        isnothing(capture) && return RuIterator{RuRE.rure_iter_next}(re, str)
         nextf = capture ? RuRE.rure_iter_next_captures : RuRE.rure_iter_next
-        return new{nextf}(re, str, obj)
+        return RuIterator{nextf}(re, str)
+    end
+    function RuIterator{F}(re::RuRegex, str::String) where F
+        if F isa typeof(RuRE.rure_iter_next_captures) || F isa typeof(RuRE.rure_iter_next)
+            obj = RuObj(RuRE.rure_iter_new(re), RuRE.rure_iter_free)
+            return new{F}(re, str, obj)
+        end
+        throw(MethodError(RuIterator{F}, (re, str)))
     end
 end
 Base.cconvert(::Type{Ptr{Cvoid}}, itr::RuIterator) = Base.cconvert(Ptr{Cvoid}, itr.obj)
@@ -188,18 +221,19 @@ function Base.iterate(itr::RuIterator{F}, _ = nothing) where F
         _m = m[]
         start = thisind(s, Int(_m.start) + 1)
         stop = thisind(s, Int(_m.stop))
-        return view(s, start:stop), nothing
+        return @inbounds view(s, start:stop), nothing
     else
         r = itr.re
         caps = RuCaptures(r)
         found = RuRE.rure_iter_next_captures(itr, s, len, caps)
         found || return nothing
-        return _captures2match(caps, r, s), nothing
+        matches = _captures2match(caps, r, s)
+        _finalize(caps)
+        return matches, nothing
     end
 end
 
 const RuRegexMatchIterator = RuIterator{RuRE.rure_iter_next_captures}
-RuRegexMatchIterator(r::RuRegex, s::String) = RuIterator(r, s)
 
 function Base.show(io::IO, itr::RuIterator{F}) where F
     if F isa typeof(RuRE.rure_iter_next)
@@ -221,6 +255,7 @@ struct RuRegexSet
         ptr = RuRE.rure_compile_set(patterns, map(length, patterns), length(patterns), flags, options, err)
         if ptr == C_NULL
             msg = Base.unsafe_string(RuRE.rure_error_message(err))
+            _finalize(err)
             error("RuRE: ", msg)
         end
         obj = RuObj(ptr, RuRE.rure_set_free)
@@ -238,7 +273,14 @@ Base.length(set::RuRegexSet) = RuRE.rure_set_len(set)
 
 Return true if there are any capture groups in the regex.
 """
-has_captures(re::RuRegex) = RuRE.rure_iter_capture_names_next(RuCaptureNamesIterator(itr), Ref{Ptr{Cchar}}(C_NULL))
+function has_captures(re::RuRegex)
+    null = Ref{Ptr{Cchar}}(C_NULL)
+    itr = RuCaptureNamesIterator(re)
+    RuRE.rure_iter_capture_names_next(itr, null)
+    hascaptures = RuRE.rure_iter_capture_names_next(itr, null)
+    _finalize(itr)
+    return hascaptures
+end
 
 """
     capture_names(re::RuRegex) -> Vector{Union{Int, String}}
@@ -262,7 +304,15 @@ julia> RustRegex.capture_names(rure"(?<hour>\\d+):(?<minute>\\d+)(am|pm)?")
 
 ```
 """
-capture_names(re::RuRegex) = collect(RuCaptureNamesIterator(re))
+function capture_names(re::RuRegex)
+    itr = RuCaptureNamesIterator(re)
+    names = collect(itr)
+    _finalize(itr)
+    return names
+end
+
+_capture_name_to_index(re::RuRegex, name::Union{String, Symbol}) = Int(RuRE.rure_capture_name_index(re, name))
+_capture_name_to_index(re::RuRegex, name::AbstractString) = _capture_name_to_index(re, String(name))
 
 """
     RuRegexMatch
@@ -273,9 +323,9 @@ The semantic is the same as `RegexMatch`.
 """
 struct RuRegexMatch <: AbstractMatch
     match::SubString{String}
-    captures::Union{Nothing, Vector{Union{Nothing, SubString{String}}}}
+    captures::Vector{Union{Nothing, SubString{String}}}
     offset::Int
-    offsets::Union{Nothing, Vector{Int}}
+    offsets::Vector{Int}
     regex::RuRegex
 end
 Base.keys(m::RuRegexMatch) = capture_names(m.regex)
@@ -284,13 +334,13 @@ Base.iterate(m::RuRegexMatch, args...) = Base.iterate(m.captures, args...)
 Base.eltype(m::RuRegexMatch) = eltype(m.captures)
 Base.haskey(m::RuRegexMatch, idx::Integer) = idx in eachindex(m.captures)
 function Base.haskey(m::RuRegexMatch, name::Union{AbstractString,Symbol})
-    idx = RuRE.rure_capture_name_index(m.regex, name)
+    idx = _capture_name_to_index(m.regex, name)
     return Int(idx) != -1
 end
 
 Base.getindex(m::RuRegexMatch, idx::Integer) = m.captures[idx]
 function Base.getindex(m::RuRegexMatch, name::Union{AbstractString,Symbol})
-    idx = RuRE.rure_capture_name_index(m.regex, name)
+    idx = _capture_name_to_index(m.regex, name)
     idx == -1 && error("no capture group named $name found in regex")
     return m[idx]
 end
@@ -311,10 +361,11 @@ end
 function _captures2match(caps::RuCaptures, r::RuRegex, s::String)
     n_cap = length(caps) - 1
     m_r = _get_capture(caps, s, 0)
-    matched = view(s, m_r)
+    matched = @inbounds view(s, m_r)
     offset = m_r.start
     if iszero(n_cap)
-        captures = offsets = nothing
+        captures = Vector{Union{Nothing,SubString{String}}}()
+        offsets = Vector{Int}()
     else
         captures = Vector{Union{Nothing, SubString{String}}}(undef, n_cap)
         offsets = Vector{Int}(undef, n_cap)
@@ -324,7 +375,7 @@ function _captures2match(caps::RuCaptures, r::RuRegex, s::String)
                 captures[i] = nothing
                 offsets[i] = 0
             else
-                captures[i] = view(s, cap_r)
+                captures[i] = @inbounds view(s, cap_r)
                 offsets[i] = cap_r.start
             end
         end
@@ -332,57 +383,195 @@ function _captures2match(caps::RuCaptures, r::RuRegex, s::String)
     return RuRegexMatch(matched, captures, offset, offsets, r)
 end
 
-function Base.occursin(r::RuRegex, s::AbstractString; offset::Integer = 0)
-    return RuRE.rure_is_match(r, s, ncodeunits(s), offset)
+function _boundcheck(s::AbstractString, idx)
+    if idx > nextind(s, lastindex(s)) || idx <= 0
+        throw(BoundsError())
+    end
 end
-function Base.occursin(r::RuRegex, s::SubString{String}; offset::Integer = 0)
-    return RuRE.rure_is_match(r, s.string, s.ncodeunits, s.offset + offset)
+_offsetcheck(s::AbstractString, offset) = _boundcheck(s, offset+1)
+
+_occursin(r::Union{RuRegex, RuRegexSet}, s::AbstractString, offset::Integer) = _occursin(r, s, ncodeunits(s), offset)
+
+function _occursin(r::Union{RuRegex, RuRegexSet}, s::AbstractString, len::Integer, offset::Integer)
+    if r isa RuRegexSet
+        return RuRE.rure_set_is_match(r, s, len, offset)
+    else
+        return RuRE.rure_is_match(r, s, len, offset)
+    end
+end
+_occursin(r::Union{RuRegex, RuRegexSet}, s::SubString{String}, len::Integer, offset::Integer) =
+    _occursin(r, s.string, s.offset + len, s.offset + offset)
+
+function Base.occursin(r::Union{RuRegex, RuRegexSet}, s::AbstractString; offset::Integer = 0)
+    @boundscheck _offsetcheck(s, offset)
+    return _occursin(r, s, offset)
 end
 
-function Base.occursin(rs::RuRegexSet, s::AbstractString; offset::Integer = 0)
-    return RuRE.rure_set_is_match(rs, s, ncodeunits(s), offset)
-end
-function Base.occursin(rs::RuRegexSet, s::SubString{String}; offset::Integer = 0)
-    return RuRE.rure_set_is_match(rs, s.string, s.ncodeunits, s.offset + offset)
-end
-
-function _findnext(r::RuRegex, s::AbstractString, idx::Integer)
+_findnext(r::RuRegex, s::AbstractString, idx::Integer) = _findnext(r, s, ncodeunits(s), idx)
+function _findnext(r::RuRegex, s::AbstractString, len::Integer, idx::Integer)
     m = Ref{UnitRange{UInt}}(0:0)
-    found = RuRE.rure_find(r, s, ncodeunits(s), idx-1, m)
+    found = RuRE.rure_find(r, s, len, idx-1, m)
     found || return nothing
     _m = m[]
     start = thisind(s, Int(_m.start) + 1)
     stop = thisind(s, Int(_m.stop))
     return start:stop
 end
-function _findnext(r::RuRegex, s::SubString{String}, idx::Integer)
-    r = _findnext(r, s.string, s.offset + idx)
+function _findnext(r::RuRegex, s::SubString{String}, len::Integer, idx::Integer)
+    offset = s.offset
+    r = _findnext(r, s.string, offset + len, offset + idx)
     return isnothing(r) ? nothing : (r .- s.offset)
 end
 
 function Base.findnext(r::RuRegex, s::AbstractString, idx::Integer)
-    if idx > nextind(s, lastindex(s))
-        throw(BoundsError(s, idx))
-    end
+    @boundscheck _boundcheck(s, idx)
     return _findnext(r, s, idx)
 end
 Base.findfirst(r::RuRegex, s::AbstractString) = findnext(r, s, 1)
 
-function Base.match(r::RuRegex, s::String, idx::Integer = 1)
+_match(r::RuRegex, s::AbstractString, idx::Integer) = _match(r, s, ncodeunits(s), idx)
+function _match(r::RuRegex, s::String, len::Integer, idx::Integer)
     caps = RuCaptures(r)
-    found = RuRE.rure_find_captures(r, s, ncodeunits(s), idx-1, caps)
+    found = RuRE.rure_find_captures(r, s, len, idx-1, caps)
     found || return nothing
-    return _captures2match(caps, r, s)
+    matches = _captures2match(caps, r, s)
+    _finalize(caps)
+    return matches
 end
-function Base.match(r::RuRegex, s::SubString{String}, idx::Integer = 1)
-    m = match(r, s.string, s.offset + idx)
+function _match(r::RuRegex, s::SubString{String}, len::Integer, idx::Integer)
+    offset = s.offset
+    m = _match(r, s.string, offset + len, offset + idx)
     isnothing(m) && return nothing
     offset = m.offset - s.offset
     @. m.offsets = max(m.offsets - s.offset, 0)
     return RuRegexMatch(m.match, m.captures, offset, m.offsets, m.regex)
 end
 
+function Base.match(r::RuRegex, s::AbstractString, idx::Integer = 1)
+    @boundscheck _boundcheck(s, idx)
+    return _match(r, s, idx)
+end
+
 Base.eachmatch(r::RuRegex, s::AbstractString) = RuRegexMatchIterator(r, String(s))
+
+function Base.startswith(s::AbstractString, r::RuRegex)
+    re = RuRegex('^' * r.pattern, r.flags)
+    ismatch = occursin(re, s)
+    _finalize(re)
+    return ismatch
+end
+
+function Base.endswith(s::AbstractString, r::RuRegex)
+    re = RuRegex(r.pattern * '$', r.flags)
+    ismatch = occursin(re, s)
+    _finalize(re)
+    return ismatch
+end
+
+# replace: Although rust regex has their rust implementation of replace, they are not exposed to rure c api.
+struct RuRegexAndMatchData
+    re::RuRegex
+    hascapture::Bool
+    captures::RuCaptures
+    function RuRegexAndMatchData(re::RuRegex)
+        hascapture = has_captures(re)
+        captures = RuCaptures(re)
+        return new(re, hascapture, captures)
+    end
+end
+
+function Base.findnext(pat::RuRegexAndMatchData, str, i)
+    re = pat.re
+    len = ncodeunits(str)
+    if !pat.hascapture
+        m = Ref{UnitRange{UInt}}(0:0)
+        found = RuRE.rure_find(re, str, len, i-1, m)
+        found || return nothing
+        _m = m[]
+        start = thisind(str, Int(_m.start) + 1)
+        stop = thisind(str, Int(_m.stop))
+        matched = start:stop
+    else
+        caps = pat.captures
+        found = RuRE.rure_find_captures(re, str, len, i-1, caps)
+        found || return nothing
+        matched = _get_capture(caps, str, 0)
+    end
+    return matched
+end
+
+Base._pat_replacer(r::RuRegex) = RuRegexAndMatchData(r)
+Base._free_pat_replacer(r::RuRegexAndMatchData) = _finalize(r.captures)
+function Base._write_capture(io::IO, group::Int, str, r, re::RuRegexAndMatchData)
+    re.hascapture || error("no capture group $group")
+    caps = re.captures
+    capture = _get_capture(caps, group)
+    isnothing(capture) && return
+    len = length(capture)
+    start = thisind(str, capture.start)
+    stop = thisind(str, capture.stop)
+    Base.ensureroom(io, len+1)
+    write(io, @inbounds view(str, start:stop))
+    return
+end
+function Base._replace(io, repl_s::SubstitutionString, str, r, re::RuRegexAndMatchData)
+    LBRACKET = '<'
+    RBRACKET = '>'
+    repl = Base.unescape_string(repl_s.string, Base.KEEP_ESC)
+    i = firstindex(repl)
+    e = lastindex(repl)
+    while i <= e
+        if repl[i] == Base.SUB_CHAR
+            next_i = nextind(repl, i)
+            next_i > e && Base.replace_err(repl)
+            if repl[next_i] == Base.SUB_CHAR
+                write(io, Base.SUB_CHAR)
+                i = nextind(repl, next_i)
+            elseif isdigit(repl[next_i])
+                group = parse(Int, repl[next_i])
+                i = nextind(repl, next_i)
+                while i <= e
+                    if isdigit(repl[i])
+                        group = 10group + parse(Int, repl[i])
+                        i = nextind(repl, i)
+                    else
+                        break
+                    end
+                end
+                Base._write_capture(io, group, str, r, re)
+            elseif repl[next_i] == Base.GROUP_CHAR
+                i = nextind(repl, next_i)
+                if i > e || repl[i] != LBRACKET
+                    Base.replace_err(repl)
+                end
+                i = nextind(repl, i)
+                i > e && Base.replace_err(repl)
+                groupstart = i
+                while repl[i] != RBRACKET
+                    i = nextind(repl, i)
+                    i > e && Base.replace_err(repl)
+                end
+                groupname = SubString(repl, groupstart, prevind(repl, i))
+                if all(isdigit, groupname)
+                    group = parse(Int, groupname)
+                elseif re isa RuRegexAndMatchData
+                    group = _capture_name_to_index(re.re, groupname)
+                    group < 0 && Base.replace_err("Group $groupname not found in regex $(re.re)")
+                else
+                    group = -1
+                end
+                Base._write_capture(io, group, str, r, re)
+                i = nextind(repl, i)
+            else
+                Base.replace_err(repl)
+            end
+        else
+            write(io, repl[i])
+            i = nextind(repl, i)
+        end
+    end
+end
+
 
 
 end
